@@ -25,6 +25,9 @@ import {
 import Papa from "papaparse";
 
 export default function ProHRDashboard() {
+  // NEW: State for hovering over employees
+  const [hoveredEmp, setHoveredEmp] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 }); // hover function
   const [employees, setEmployees] = useState([]);
   const [predictions, setPredictions] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -44,6 +47,7 @@ export default function ProHRDashboard() {
   const [searchTerm, setSearchTerm] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 20;
+  const [selectedDepartment, setSelectedDepartment] = useState('All'); // department wise
 
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
@@ -254,11 +258,21 @@ const limitedData = cleanData.slice(0, 50);  // 🔥 LIMIT TO 50 ROWS
 
   const COLORS = ["#ef4444", "#10b981"];
 
+  // department
+  const departments = ['All', ...new Set(predictions?.payroll.map(emp => emp.department).filter(Boolean))];
+
   const filteredPayroll =
     predictions?.payroll.filter((emp) => {
+
+      // New for department
+      const isDeptMatch = selectedDepartment === 'All' || emp.department === selectedDepartment;
+
       return (
-        (emp.name || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+        isDeptMatch && (
+          (emp.name || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
         (emp.employee_id || "").toLowerCase().includes(searchTerm.toLowerCase())
+        )
+        
       );
     }) || [];
 
@@ -972,6 +986,29 @@ chartScrollInner: {
               >
                 <h3 style={styles.chartTitle}>Payroll Predictions</h3>
 
+                {/* NEW: Department Dropdown */}
+                <select
+                  value={selectedDepartment}
+                  onChange={(e) => {
+                    setSelectedDepartment(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    border: "1px solid #475569",
+                    background: "#0f172a",
+                    color: "white",
+                    marginRight: "16px", // Adds space between dropdown and search bar
+                  }}
+                >
+                  {departments.map((dept, index) => (
+                    <option key={index} value={dept}>
+                      {dept}
+                    </option>
+                  ))}
+                </select>
+
                 <input
                   type="text"
                   placeholder="Search..."
@@ -1023,12 +1060,22 @@ chartScrollInner: {
                 <tbody>
                   {paginatedData.map((emp, idx) => (
                     <tr
-                      key={idx}
+                     key={idx}
+                      /* NEW: Hover Event Listeners */
+                      onMouseEnter={(e) => {
+                        setHoveredEmp(emp);
+                        setTooltipPos({ x: e.clientX, y: e.clientY });
+                      }}
+                      onMouseMove={(e) => {
+                        setTooltipPos({ x: e.clientX, y: e.clientY });
+                      }}
+                      onMouseLeave={() => setHoveredEmp(null)}
                       style={{
                         background:
                           idx % 2 === 0
                             ? "rgba(30, 41, 59, 0.5)"
                             : "transparent",
+                        cursor: "pointer", /* NEW: Makes it look clickable/hoverable */
                       }}
                     >
                       {/* Employee ID */}
@@ -1159,6 +1206,7 @@ chartScrollInner: {
                   Last ⏩
                 </button>
               </div>
+              
             </div>
           </div>
         )}
@@ -1169,6 +1217,53 @@ chartScrollInner: {
             <p style={{ color: "#cbd5e1", marginTop: "16px" }}>
               Processing data...
             </p>
+          </div>
+        )}
+        {hoveredEmp && (
+          <div
+            style={{
+              position: "fixed",
+              top: tooltipPos.y + 15,
+              left: tooltipPos.x + 15,
+              background: "#1e293b",
+              border: "1px solid #475569",
+              borderRadius: "8px",
+              padding: "16px",
+              color: "white",
+              boxShadow: "0 20px 25px rgba(0,0,0,0.5)",
+              zIndex: 1000,
+              pointerEvents: "none", // Prevents the tooltip from blocking your mouse
+              minWidth: "250px",
+            }}
+          >
+            <h4 style={{ margin: "0 0 12px 0", color: "#3b82f6", borderBottom: "1px solid #334155", paddingBottom: "8px" }}>
+              {hoveredEmp.name} ({hoveredEmp.employee_id})
+            </h4>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", fontSize: "12px" }}>
+              <span style={{ color: "#94a3b8" }}>Department:</span> 
+              <span>{hoveredEmp.department || "N/A"}</span>
+              
+              <span style={{ color: "#94a3b8" }}>Age:</span> 
+              <span>{hoveredEmp.age || "N/A"}</span>
+              
+              <span style={{ color: "#94a3b8" }}>Experience:</span> 
+              <span>{hoveredEmp.experience_years || 0} yrs</span>
+              
+              <span style={{ color: "#94a3b8" }}>Tasks Done:</span> 
+              <span>{hoveredEmp.total_tasks_completed || hoveredEmp.tasks_completed || 0}</span>
+              
+              <span style={{ color: "#94a3b8" }}>Performance:</span> 
+              <span>{hoveredEmp.performance_rating || "N/A"}/10</span>
+              
+              <span style={{ color: "#94a3b8" }}>Leaves:</span> 
+              <span>{hoveredEmp.unpaid_leaves || hoveredEmp.holidays_taken || 0}</span>
+              
+              <span style={{ color: "#94a3b8" }}>Late Logins:</span> 
+              <span>{hoveredEmp.late_login_count || 0}</span>
+              
+              <span style={{ color: "#94a3b8" }}>Job Satisfaction:</span> 
+              <span>{hoveredEmp.job_satisfaction || "N/A"}/10</span>
+            </div>
           </div>
         )}
       </div>
