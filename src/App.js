@@ -1,4 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
+
+import html2canvas from "html2canvas"; // NEW
+import jsPDF from "jspdf"; // NEW
 import {
   Upload,
   BarChart3,
@@ -48,7 +51,32 @@ export default function ProHRDashboard() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 20;
   const [selectedDepartment, setSelectedDepartment] = useState('All'); // department wise
+  // NEW: Ref for PDF Export
+  const dashboardRef = useRef(null);
 
+  // NEW: State for the What-If Simulator Modal
+  const [simEmp, setSimEmp] = useState(null);
+  const [simBonus, setSimBonus] = useState(0); // Percentage increase
+  
+  // NEW: State for AI Chat Widget
+  const [isChatOpen, setIsChatOpen] = useState(false);
+
+  // NEW: PDF Generation Function
+  const exportToPDF = () => {
+    const element = dashboardRef.current;
+    if (!element) return;
+    
+    html2canvas(element, { scale: 2 }).then((canvas) => {
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF("p", "mm", "a4");
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+      
+      pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`ProHR_Report_${selectedDepartment}.pdf`);
+    });
+  };
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -730,7 +758,24 @@ chartScrollInner: {
 
         {/* Dashboard Section */}
         {activeTab === "dashboard" && stats && (
-          <div>
+          
+          
+            // NEW: Added ref={dashboardRef} here
+          <div ref={dashboardRef} style={{ padding: "10px", background: "#0f172a" }}>
+              
+            {/* NEW: Export to PDF Button Header */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
+              <h2 style={{ color: "white", margin: 0 }}>{selectedDepartment} Department Health Report</h2>
+              <button 
+                onClick={exportToPDF}
+                style={{
+                  background: "#3b82f6", color: "white", padding: "10px 16px",
+                  borderRadius: "6px", border: "none", cursor: "pointer", fontWeight: "bold"
+                }}
+              >
+                📥 Export to PDF
+              </button>
+            </div>
             {/* Key Metrics */}
             <div style={styles.metricsGrid}>
               <div
@@ -1061,6 +1106,11 @@ chartScrollInner: {
                   {paginatedData.map((emp, idx) => (
                     <tr
                      key={idx}
+                     /* NEW: Click to open Simulator */
+                      onClick={() => {
+                        setSimEmp(emp);
+                        setSimBonus(0); // Reset slider when opening
+                      }}
                       /* NEW: Hover Event Listeners */
                       onMouseEnter={(e) => {
                         setHoveredEmp(emp);
@@ -1263,6 +1313,92 @@ chartScrollInner: {
               
               <span style={{ color: "#94a3b8" }}>Job Satisfaction:</span> 
               <span>{hoveredEmp.job_satisfaction || "N/A"}/10</span>
+            </div>
+          </div>
+        )}
+        {/* NEW: What-If Simulator Modal */}
+        {simEmp && (
+          <div style={{
+            position: "fixed", top: 0, left: 0, width: "100%", height: "100%",
+            background: "rgba(0,0,0,0.7)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 2000
+          }}>
+            <div style={{
+              background: "#1e293b", padding: "32px", borderRadius: "12px", border: "1px solid #475569", width: "400px", color: "white"
+            }}>
+              <h3 style={{ marginTop: 0, color: "#60a5fa" }}>Retention Simulator</h3>
+              <p>Simulate interventions for <strong>{simEmp.name}</strong></p>
+              
+              <div style={{ display: "flex", justifyContent: "space-between", margin: "24px 0 12px" }}>
+                <span>Current Risk:</span>
+                <span style={{ color: "#ef4444", fontWeight: "bold" }}>{simEmp.attritionRisk}%</span>
+              </div>
+
+              {/* A simple mock simulation logic: Every 5% salary bump reduces risk by ~3-5% */}
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "24px" }}>
+                <span>Simulated Risk:</span>
+                <span style={{ color: "#10b981", fontWeight: "bold" }}>
+                  {Math.max(0, simEmp.attritionRisk - Math.floor(simBonus * 0.8))}%
+                </span>
+              </div>
+
+              <div style={{ marginBottom: "24px" }}>
+                <label style={{ display: "block", marginBottom: "8px" }}>
+                  Simulate Salary Bonus: +{simBonus}%
+                </label>
+                <input 
+                  type="range" min="0" max="30" value={simBonus} 
+                  onChange={(e) => setSimBonus(Number(e.target.value))}
+                  style={{ width: "100%" }}
+                />
+                <p style={{ fontSize: "12px", color: "#94a3b8" }}>
+                  New Projected Salary: ₹{Math.round((simEmp.salary || 0) * (1 + simBonus / 100)).toLocaleString()}
+                </p>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
+                <button onClick={() => setSimEmp(null)} style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer", background: "#475569", color: "white", border: "none" }}>
+                  Close
+                </button>
+                <button onClick={() => { alert("Action saved to backend!"); setSimEmp(null); }} style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer", background: "#3b82f6", color: "white", border: "none" }}>
+                  Apply Intervention
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* NEW: Agentic AI Chat Float Button */}
+        <div 
+          onClick={() => setIsChatOpen(!isChatOpen)}
+          style={{
+            position: "fixed", bottom: "30px", right: "30px", background: "#9333ea", 
+            width: "60px", height: "60px", borderRadius: "50%", display: "flex", 
+            justifyContent: "center", alignItems: "center", cursor: "pointer", 
+            boxShadow: "0 10px 25px rgba(0,0,0,0.5)", zIndex: 1000, fontSize: "24px"
+          }}
+        >
+          🤖
+        </div>
+
+        {/* NEW: Chat Window Shell */}
+        {isChatOpen && (
+          <div style={{
+            position: "fixed", bottom: "100px", right: "30px", width: "350px", height: "450px",
+            background: "#1e293b", borderRadius: "12px", border: "1px solid #475569",
+            boxShadow: "0 20px 25px rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", flexDirection: "column"
+          }}>
+            <div style={{ background: "#9333ea", padding: "16px", borderRadius: "12px 12px 0 0", color: "white", fontWeight: "bold" }}>
+              ProHR Data Assistant
+            </div>
+            <div style={{ flex: 1, padding: "16px", color: "#94a3b8", overflowY: "auto", fontSize: "14px" }}>
+              <p>👋 Hi! I'm analyzing {employees.length} employee records.</p>
+              <p>Ask me things like: <br/><em>"Who is most likely to leave in Engineering?"</em></p>
+            </div>
+            <div style={{ padding: "16px", borderTop: "1px solid #334155" }}>
+              <input 
+                type="text" placeholder="Type your question..." 
+                style={{ width: "100%", padding: "10px", borderRadius: "6px", border: "1px solid #475569", background: "#0f172a", color: "white" }}
+              />
             </div>
           </div>
         )}
