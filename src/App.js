@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
 import Papa from "papaparse";
@@ -36,6 +36,7 @@ import PredictionsTab from "./components/PredictionsTab";
 import AnalyticsTab from "./components/AnalyticsTab";
 import { ToastContainer, toast } from "./components/Toast";
 import { fetchPrediction } from "./hooks/usePredictions";
+import ChatBot from "./components/ChatBot";
 
 const INITIAL_USERS = [
   { email: "admin@prohr.com", password: "admin123", role: "admin", name: "Admin" },
@@ -102,6 +103,45 @@ export default function ProHRDashboard() {
   const [simEmp, setSimEmp] = useState(null);
   const [simBonus, setSimBonus] = useState(0);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [showBotPopup, setShowBotPopup] = useState(false);
+
+  useEffect(() => {
+    if (!stats) return;
+    setShowBotPopup(true);
+    const t = setTimeout(() => setShowBotPopup(false), 7000);
+
+    // TTS — fires with popup when data loads
+    const greeting = `Hi! I am your ProHR Assistant. I have analyzed ${stats.totalEmployees} employees. Click the bot icon to explore insights about high risk, low risk employees, and more!`;
+    const doSpeak = () => {
+      if (!("speechSynthesis" in window)) return;
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(greeting);
+      utter.rate = 0.9;
+      utter.pitch = 1.05;
+      utter.volume = 1;
+      const voices = window.speechSynthesis.getVoices();
+      const pick = voices.find((v) => v.lang.startsWith("en") && /female|zira|samantha|karen/i.test(v.name))
+        || voices.find((v) => v.lang.startsWith("en"))
+        || voices[0];
+      if (pick) utter.voice = pick;
+      window.speechSynthesis.speak(utter);
+    };
+
+    // voices load asynchronously in some browsers
+    if (window.speechSynthesis.getVoices().length > 0) {
+      setTimeout(doSpeak, 600);
+    } else {
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.onvoiceschanged = null;
+        setTimeout(doSpeak, 300);
+      };
+    }
+
+    return () => {
+      clearTimeout(t);
+      window.speechSynthesis.cancel();
+    };
+  }, [stats]);
 
   // Refs
   const dashboardRef = useRef(null);
@@ -125,36 +165,80 @@ export default function ProHRDashboard() {
     performance: Number(emp.tasks_completed || emp.total_tasks_completed || 0)
   }));
 
+  // Department pie chart data
+  const deptMap = {};
+  payrollData.forEach(emp => {
+    const d = emp.department || "Unknown";
+    deptMap[d] = (deptMap[d] || 0) + 1;
+  });
+  const deptPieData = Object.entries(deptMap).map(([name, value]) => ({ name, value }));
+
+  // Department avg attrition risk line chart
+  const riskMap = {};
+  payrollData.forEach(emp => {
+    const d = emp.department || "Unknown";
+    if (!riskMap[d]) riskMap[d] = { total: 0, count: 0 };
+    riskMap[d].total += emp.attritionRisk || 0;
+    riskMap[d].count += 1;
+  });
+  const riskLineData = Object.entries(riskMap)
+    .map(([dept, v]) => ({ dept, avgRisk: Math.round(v.total / v.count) }))
+    .sort((a, b) => b.avgRisk - a.avgRisk);
+
+  const PIE_COLORS = ["#6366f1","#8b5cf6","#ec4899","#f59e0b","#10b981","#3b82f6","#ef4444","#14b8a6"];
+
   const exportToPDF = () => {
     const element = dashboardRef.current;
-    if (!element) return;
-    
-    html2canvas(element, { scale: 2 }).then((canvas) => {
-      const imgData = canvas.toDataURL("image/png");
-      const pdf = new jsPDF("p", "mm", "a4");
-      const imgProps = pdf.getImageProperties(imgData);
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
-      
-      pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
-      pdf.save(`ProHR_Report_${selectedDepartment}.pdf`);
-    });
+    if (!element) {
+      toast.error("Dashboard not ready. Please wait.");
+      return;
+    }
+
+    toast.info("Generating PDF, please wait...");
+
+    html2canvas(element, {
+      scale: 1.5,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: "#0f172a",
+      logging: false,
+      scrollX: 0,
+      scrollY: -window.scrollY,
+      windowWidth: document.documentElement.offsetWidth,
+    })
+      .then((canvas) => {
+        const imgData = canvas.toDataURL("image/png");
+        const pdf = new jsPDF("l", "mm", "a4");
+        const pdfW = pdf.internal.pageSize.getWidth();
+        const pdfH = pdf.internal.pageSize.getHeight();
+        const ratio = Math.min(pdfW / canvas.width, pdfH / canvas.height);
+        const x = (pdfW - canvas.width * ratio) / 2;
+        pdf.addImage(imgData, "PNG", x, 0, canvas.width * ratio, canvas.height * ratio);
+        pdf.save(`ProHR_Report_${selectedDepartment}.pdf`);
+        toast.success("PDF exported successfully!");
+      })
+      .catch(() => {
+        toast.error("PDF export failed. Try again.");
+      });
   };
 
   const analyzeData = useCallback(async (data) => {
     setLoading(true);
     setLoadingMsg("Parsing employee records...");
 
-    const cleanData = data.filter((e) => e.employee_id && e.salary && !isNaN(parseFloat(e.salary)));
-    const total = cleanData.length;
+    const allClean = data.filter((e) => e.employee_id && e.salary && !isNaN(parseFloat(e.salary)));
 
-    if (total === 0) {
+    if (allClean.length === 0) {
       setLoading(false);
       toast.error("No valid employee data found. Check CSV format.");
       return;
     }
 
-    setLoadingMsg(`Running ML predictions for ${total} employees...`);
+    const cleanData = allClean.slice(0, 100);
+    const total = cleanData.length;
+
+
+    setLoadingMsg("Running ML predictions...");
 
     let totalBonuses = 0;
     let totalDeductions = 0;
@@ -292,7 +376,7 @@ export default function ProHRDashboard() {
 
         <div style={styles.maxWidth}>
           {/* Navigation Tabs - Refined Pill Layout */}
-          <div style={{ marginBottom: 28, display: "flex", flexWrap: "wrap" }}>
+          <div style={{ marginBottom: 28, display: "flex", flexWrap: "wrap", justifyContent: "center" }}>
             <div style={{
               background: "rgba(255,255,255,0.8)",
               backdropFilter: "blur(12px)",
@@ -372,34 +456,7 @@ export default function ProHRDashboard() {
             <div key={activeTab} className="tab-slide">
               {/* UPLOAD TAB */}
               {activeTab === "upload" && (
-                <div>
-                  <div style={styles.uploadBox}>
-                    <h2 style={styles.uploadTitle}>Upload Employee Data</h2>
-                    <div style={styles.uploadArea}>
-                      <input type="file" accept=".csv" onChange={handleFileUpload} style={{ display: "none" }} id="csv-input" />
-                      <label htmlFor="csv-input" style={{ cursor: "pointer" }}>
-                        <Upload size={48} style={{ color: "#60a5fa", margin: "0 auto 16px" }} />
-                        <p style={styles.uploadText}>Click to upload CSV</p>
-                        <p style={styles.uploadSubtext}>
-                          Required columns: employee_id, name, salary, holidays_taken, tasks_completed
-                        </p>
-                      </label>
-                    </div>
-                    <div style={{ marginTop: "24px", background: "#334155", padding: "16px", borderRadius: "4px", color: "#cbd5e1", fontSize: "12px", textAlign: "left" }}>
-                      <p style={{ fontWeight: "600", color: "#93c5fd", marginBottom: "8px" }}>📋 CSV Format Example:</p>
-                      <code style={styles.codeBlock}>
-                        employee_id,name,salary,holidays_taken,tasks_completed<br />
-                        E001,John Doe,50000,5,120<br />
-                        E002,Jane Smith,60000,3,135
-                      </code>
-                    </div>
-                  </div>
-                  {stats && (
-                    <div style={styles.successMessage}>
-                      <p style={{ fontWeight: "600" }}>✓ Data uploaded successfully! {stats.totalEmployees} employees analyzed.</p>
-                    </div>
-                  )}
-                </div>
+                <UploadTab onUpload={handleFileUpload} stats={stats} loading={loading} />
               )}
 
               {/* DASHBOARD TAB */}
@@ -457,97 +514,62 @@ export default function ProHRDashboard() {
                     </div>
                   </div>
 
-                  {/* Performance Chart */}
-                  <div style={styles.chartBox}>
-                    <h3 style={styles.chartTitle}>Total Tasks Completed by Employees</h3>
-                    <div style={styles.chartScrollOuter}>
-                      <div style={{ ...styles.chartScrollInner, width: `${Math.max(performanceDistribution.length * 70, 900)}px` }}>
-                        <BarChart width={Math.max(performanceDistribution.length * 70, 900)} height={350} data={performanceDistribution} margin={{ top: 20, right: 30, left: 20, bottom: 60 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
-                          <XAxis dataKey="name" stroke="#cbd5e1" angle={-45} textAnchor="end" interval={0} height={100} />
-                          <YAxis stroke="#cbd5e1" label={{ value: "Tasks Completed", angle: -90, position: "insideLeft", fill: "#cbd5e1", style: { textAnchor: "middle" } }} />
-                          <Tooltip />
-                          <Legend />
-                          <Bar dataKey="performance" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                        </BarChart>
-                      </div>
-                    </div>
-                    <div style={{ textAlign: "center", color: "#cbd5e1", marginTop: "10px", fontSize: "14px", fontWeight: "500" }}>
-                      Employee Name
-                    </div>
-                  </div>
+                  {/* Charts Row — Dept Pie + Risk Line */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginTop: 24 }}>
 
-                  {/* Payroll Details Table */}
-                  <div style={{ ...styles.chartBox, marginTop: "24px", overflowX: "auto", padding: "16px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-                      <h3 style={styles.chartTitle}>Payroll Predictions</h3>
-                      <div>
-                        <select value={selectedDepartment} onChange={(e) => { setSelectedDepartment(e.target.value); setCurrentPage(1); }} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #475569", background: "#0f172a", color: "white", marginRight: "16px" }}>
-                          {departments.map((dept, index) => (
-                            <option key={index} value={dept}>{dept}</option>
-                          ))}
-                        </select>
-                        <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #475569", background: "#0f172a", color: "white", width: "220px" }} />
-                      </div>
-                    </div>
-
-                    <table style={styles.table}>
-                      <thead>
-                        <tr style={styles.tableHeader}>
-                          <th style={{ textAlign: "left", ...styles.tableCell }}>Emp ID</th>
-                          <th style={{ textAlign: "left", ...styles.tableCell }}>Name</th>
-                          <th style={{ textAlign: "center", ...styles.tableCell }}>Age</th>
-                          <th style={{ textAlign: "center", ...styles.tableCell }}>Dept</th>
-                          <th style={{ textAlign: "center", ...styles.tableCell }}>Experience</th>
-                          <th style={{ textAlign: "right", ...styles.tableCell }}>Salary</th>
-                          <th style={{ textAlign: "right", ...styles.tableCell }}>Final Payable</th>
-                          <th style={{ textAlign: "right", ...styles.tableCell }}>Predicted Salary</th>
-                          <th style={{ textAlign: "right", ...styles.tableCell }}>Attrition Risk</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {paginatedData.map((emp, idx) => (
-                          <tr
-                            key={idx}
-                            onClick={() => { setSimEmp(emp); setSimBonus(0); }}
-                            onMouseEnter={(e) => { setHoveredEmp(emp); setTooltipPos({ x: e.clientX, y: e.clientY }); }}
-                            onMouseMove={(e) => { setTooltipPos({ x: e.clientX, y: e.clientY }); }}
-                            onMouseLeave={() => setHoveredEmp(null)}
-                            style={{ background: idx % 2 === 0 ? "rgba(30, 41, 59, 0.5)" : "transparent", cursor: "pointer" }}
+                    {/* Department Pie Chart */}
+                    <div style={styles.chartBox}>
+                      <h3 style={styles.chartTitle}>Department Distribution</h3>
+                      <ResponsiveContainer width="100%" height={280}>
+                        <PieChart>
+                          <Pie
+                            data={deptPieData}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={60}
+                            outerRadius={100}
+                            paddingAngle={3}
+                            dataKey="value"
+                            label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                            labelLine={false}
                           >
-                            <td style={{ ...styles.tableCell, textAlign: "left" }}>{emp.employee_id}</td>
-                            <td style={{ ...styles.tableCell, textAlign: "left" }}>{emp.name}</td>
-                            <td style={{ ...styles.tableCell, textAlign: "center" }}>{emp.age || "N/A"}</td>
-                            <td style={{ ...styles.tableCell, textAlign: "center" }}>{emp.department || "N/A"}</td>
-                            <td style={{ ...styles.tableCell, textAlign: "center" }}>{emp.experience_years} yrs</td>
-                            <td style={{ ...styles.tableCell, textAlign: "right" }}>₹{(emp.salary || 0).toLocaleString()}</td>
-                            <td style={{ ...styles.tableCell, textAlign: "right", color: "#60a5fa", fontWeight: "bold" }}>₹{(emp.finalPayable || 0).toLocaleString()}</td>
-                            <td style={{ ...styles.tableCell, textAlign: "right", color: "#a855f7" }}>₹{(emp.mlSalary || 0).toLocaleString()}</td>
-                            <td style={{ ...styles.tableCell, textAlign: "right", color: emp.attritionRisk > 70 ? "#ef4444" : emp.attritionRisk > 40 ? "#facc15" : "#4ade80", fontWeight: "bold" }}>
-                              {emp.attritionRisk || 0}%
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                            {deptPieData.map((_, i) => (
+                              <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(v) => [`${v} employees`, "Count"]} contentStyle={{ background: "#1e293b", border: "1px solid #475569", borderRadius: 8, color: "white" }} />
+                          <Legend
+                            formatter={(value) => <span style={{ color: "#cbd5e1", fontSize: 12 }}>{value}</span>}
+                          />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
 
-                    {/* Pagination */}
-                    <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginTop: "16px", alignItems: "center" }}>
-                      <button onClick={() => setCurrentPage(1)} disabled={currentPage === 1} style={{ padding: "6px 12px", cursor: currentPage === 1 ? "not-allowed" : "pointer", opacity: currentPage === 1 ? 0.5 : 1 }}>
-                        ⏮ First
-                      </button>
-                      <button onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))} disabled={currentPage === 1} style={{ padding: "6px 12px", cursor: currentPage === 1 ? "not-allowed" : "pointer", opacity: currentPage === 1 ? 0.5 : 1 }}>
-                        ⬅ Prev
-                      </button>
-                      <span style={{ color: "white" }}>Page {currentPage} of {totalPages}</span>
-                      <button onClick={() => setCurrentPage((prev) => (prev < totalPages ? prev + 1 : prev))} disabled={currentPage === totalPages} style={{ padding: "6px 12px", cursor: currentPage === totalPages ? "not-allowed" : "pointer", opacity: currentPage === totalPages ? 0.5 : 1 }}>
-                        Next ➡
-                      </button>
-                      <button onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} style={{ padding: "6px 12px", cursor: currentPage === totalPages ? "not-allowed" : "pointer", opacity: currentPage === totalPages ? 0.5 : 1 }}>
-                        Last ⏩
-                      </button>
+                    {/* Attrition Risk Line Chart */}
+                    <div style={styles.chartBox}>
+                      <h3 style={styles.chartTitle}>Avg Attrition Risk by Department</h3>
+                      <ResponsiveContainer width="100%" height={280}>
+                        <LineChart data={riskLineData} margin={{ top: 10, right: 20, left: 0, bottom: 40 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                          <XAxis dataKey="dept" stroke="#94a3b8" angle={-30} textAnchor="end" height={60} tick={{ fontSize: 11 }} />
+                          <YAxis stroke="#94a3b8" domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11 }} />
+                          <Tooltip
+                            formatter={(v) => [`${v}%`, "Avg Risk"]}
+                            contentStyle={{ background: "#1e293b", border: "1px solid #475569", borderRadius: 8, color: "white" }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="avgRisk"
+                            stroke="#ef4444"
+                            strokeWidth={2.5}
+                            dot={{ fill: "#ef4444", r: 5, strokeWidth: 2, stroke: "#1e293b" }}
+                            activeDot={{ r: 7, fill: "#f97316" }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
                     </div>
                   </div>
+
                 </div>
               )}
 
@@ -609,25 +631,198 @@ export default function ProHRDashboard() {
           </div>
         )}
 
-        {/* Agentic AI Chat Widget */}
-        <div onClick={() => setIsChatOpen(!isChatOpen)} style={{ position: "fixed", bottom: "30px", right: "30px", background: "#9333ea", width: "60px", height: "60px", borderRadius: "50%", display: "flex", justifyContent: "center", alignItems: "center", cursor: "pointer", boxShadow: "0 10px 25px rgba(0,0,0,0.5)", zIndex: 1000, fontSize: "24px" }}>
-          🤖
-        </div>
+        {/* Chat FAB — only after data uploaded */}
+        {stats && (
+          <>
+            <style>{`
+              @keyframes fabRingSpin {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+              }
+              @keyframes fabOrbit {
+                from { transform: rotate(0deg) translateX(34px) rotate(0deg); }
+                to { transform: rotate(360deg) translateX(34px) rotate(-360deg); }
+              }
+              @keyframes fabGlow {
+                0%, 100% { box-shadow: 0 0 20px 4px rgba(147,51,234,0.55); }
+                50% { box-shadow: 0 0 34px 10px rgba(99,102,241,0.7); }
+              }
+              @keyframes eyeBlink {
+                0%, 92%, 100% { transform: scaleY(1); }
+                96% { transform: scaleY(0.1); }
+              }
+              @keyframes popupIn {
+                from { opacity: 0; transform: translateX(30px) scale(0.92); }
+                to { opacity: 1; transform: translateX(0) scale(1); }
+              }
+              @keyframes popupOut {
+                from { opacity: 1; transform: translateX(0) scale(1); }
+                to { opacity: 0; transform: translateX(30px) scale(0.92); }
+              }
+              @keyframes typeDots {
+                0%,80%,100% { opacity: 0.2; transform: translateY(0); }
+                40% { opacity: 1; transform: translateY(-3px); }
+              }
+              .chat-fab-btn:hover .fab-inner { transform: scale(1.08); }
+              .chat-fab-btn:hover { filter: brightness(1.1); }
+            `}</style>
 
-        {isChatOpen && (
-          <div style={{ position: "fixed", bottom: "100px", right: "30px", width: "350px", height: "450px", background: "#1e293b", borderRadius: "12px", border: "1px solid #475569", boxShadow: "0 20px 25px rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", flexDirection: "column" }}>
-            <div style={{ background: "#9333ea", padding: "16px", borderRadius: "12px 12px 0 0", color: "white", fontWeight: "bold", display: "flex", justifyContent: "space-between" }}>
-              <span>ProHR Data Assistant</span>
-              <button onClick={() => setIsChatOpen(false)} style={{ background: "transparent", border: "none", color: "white", cursor: "pointer" }}>✕</button>
+            {/* Popup speech bubble */}
+            {showBotPopup && !isChatOpen && (
+              <div style={{
+                position: "fixed", bottom: 108, right: 100,
+                background: "linear-gradient(135deg, #1e1b4b, #2e1065)",
+                border: "1px solid rgba(147,51,234,0.4)",
+                borderRadius: "16px 16px 4px 16px",
+                padding: "14px 18px",
+                width: 230,
+                boxShadow: "0 12px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(147,51,234,0.2)",
+                zIndex: 1002,
+                animation: `${showBotPopup ? "popupIn" : "popupOut"} 0.4s cubic-bezier(0.34,1.56,0.64,1) forwards`,
+              }}>
+                {/* tail */}
+                <div style={{
+                  position: "absolute", bottom: -10, right: 18,
+                  width: 0, height: 0,
+                  borderLeft: "10px solid transparent",
+                  borderRight: "0px solid transparent",
+                  borderTop: "10px solid rgba(147,51,234,0.4)",
+                }} />
+                <div style={{
+                  position: "absolute", bottom: -8, right: 19,
+                  width: 0, height: 0,
+                  borderLeft: "9px solid transparent",
+                  borderRight: "0px solid transparent",
+                  borderTop: "9px solid #2e1065",
+                }} />
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{
+                    width: 28, height: 28, borderRadius: "50%",
+                    background: "linear-gradient(135deg, #9333ea, #6366f1)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 14, flexShrink: 0,
+                  }}>🤖</div>
+                  <span style={{ color: "#c4b5fd", fontWeight: 700, fontSize: 13 }}>ProHR Assistant</span>
+                  <button
+                    onClick={() => setShowBotPopup(false)}
+                    style={{ marginLeft: "auto", background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 14, lineHeight: 1 }}
+                  >✕</button>
+                </div>
+
+                <p style={{ color: "#e2e8f0", fontSize: 12.5, margin: 0, lineHeight: 1.6 }}>
+                  👋 Hi! I've analyzed <strong style={{ color: "#a78bfa" }}>{stats.totalEmployees} employees</strong>.
+                  <br />Ask me about risks, departments & more!
+                </p>
+
+                <div style={{ display: "flex", gap: 3, marginTop: 10, alignItems: "center" }}>
+                  <span style={{ color: "#64748b", fontSize: 11 }}>Click the bot to start</span>
+                  {[0,1,2].map(i => (
+                    <span key={i} style={{
+                      width: 5, height: 5, borderRadius: "50%",
+                      background: "#9333ea", display: "inline-block",
+                      animation: `typeDots 1.2s ease-in-out ${i * 0.2}s infinite`,
+                    }} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Animated FAB */}
+            <div
+              className="chat-fab-btn"
+              onClick={() => { setIsChatOpen(!isChatOpen); setShowBotPopup(false); }}
+              style={{
+                position: "fixed", bottom: 28, right: 28,
+                width: 68, height: 68,
+                cursor: "pointer", zIndex: 1001,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}
+            >
+              {/* Spinning gradient ring */}
+              {!isChatOpen && (
+                <div style={{
+                  position: "absolute", inset: -3,
+                  borderRadius: "50%",
+                  background: "conic-gradient(from 0deg, #9333ea, #6366f1, #06b6d4, #9333ea)",
+                  animation: "fabRingSpin 3s linear infinite",
+                  zIndex: 0,
+                }} />
+              )}
+
+              {/* Glow + inner circle */}
+              <div className="fab-inner" style={{
+                position: "relative", zIndex: 1,
+                width: 62, height: 62, borderRadius: "50%",
+                background: isChatOpen
+                  ? "linear-gradient(145deg, #4f46e5, #7e22ce)"
+                  : "linear-gradient(145deg, #7e22ce, #4f46e5)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: "transform 0.2s ease",
+                animation: !isChatOpen ? "fabGlow 2.5s ease-in-out infinite" : "none",
+              }}>
+                {isChatOpen ? (
+                  /* Close X */
+                  <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                    <path d="M17 5L5 17M5 5l12 12" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+                  </svg>
+                ) : (
+                  /* Animated robot face */
+                  <svg width="38" height="38" viewBox="0 0 38 38" fill="none">
+                    {/* antenna stem */}
+                    <rect x="18" y="3" width="2" height="7" rx="1" fill="rgba(255,255,255,0.9)"/>
+                    {/* antenna ball */}
+                    <circle cx="19" cy="3" r="2.2" fill="white"/>
+                    <circle cx="19" cy="3" r="1" fill="#a78bfa"/>
+                    {/* head */}
+                    <rect x="7" y="10" width="24" height="18" rx="6" fill="white" fillOpacity="0.95"/>
+                    {/* left eye group */}
+                    <g style={{transformOrigin:"13px 19px", animation:"eyeBlink 4s ease-in-out infinite"}}>
+                      <circle cx="13" cy="19" r="3.5" fill="#7e22ce"/>
+                      <circle cx="14.2" cy="17.8" r="1.2" fill="white"/>
+                      <circle cx="13" cy="19" r="1" fill="#1e1b4b"/>
+                    </g>
+                    {/* right eye group */}
+                    <g style={{transformOrigin:"25px 19px", animation:"eyeBlink 4s ease-in-out 0.1s infinite"}}>
+                      <circle cx="25" cy="19" r="3.5" fill="#7e22ce"/>
+                      <circle cx="26.2" cy="17.8" r="1.2" fill="white"/>
+                      <circle cx="25" cy="19" r="1" fill="#1e1b4b"/>
+                    </g>
+                    {/* smile */}
+                    <path d="M14 24.5 Q19 27.5 24 24.5" stroke="#7e22ce" strokeWidth="1.8" strokeLinecap="round" fill="none"/>
+                    {/* left ear */}
+                    <rect x="4" y="16" width="3.5" height="7" rx="1.75" fill="white" fillOpacity="0.8"/>
+                    {/* right ear */}
+                    <rect x="30.5" y="16" width="3.5" height="7" rx="1.75" fill="white" fillOpacity="0.8"/>
+                  </svg>
+                )}
+              </div>
+
+              {/* Orbiting dot */}
+              {!isChatOpen && (
+                <div style={{
+                  position: "absolute", top: "50%", left: "50%",
+                  width: 8, height: 8, marginTop: -4, marginLeft: -4,
+                  animation: "fabOrbit 3s linear infinite",
+                  zIndex: 2, pointerEvents: "none",
+                }}>
+                  <div style={{
+                    width: 8, height: 8, borderRadius: "50%",
+                    background: "#22d3ee",
+                    boxShadow: "0 0 6px 2px rgba(34,211,238,0.8)",
+                  }} />
+                </div>
+              )}
             </div>
-            <div style={{ flex: 1, padding: "16px", color: "#94a3b8", overflowY: "auto", fontSize: "14px" }}>
-              <p>👋 Hi! I'm analyzing {employees.length} employee records.</p>
-              <p>Ask me things like: <br/><em>"Who is most likely to leave in Engineering?"</em></p>
-            </div>
-            <div style={{ padding: "16px", borderTop: "1px solid #334155" }}>
-              <input type="text" placeholder="Type your question..." style={{ width: "90%", padding: "10px", borderRadius: "6px", border: "1px solid #475569", background: "#0f172a", color: "white" }} />
-            </div>
-          </div>
+
+            <ChatBot
+              isOpen={isChatOpen}
+              onClose={() => setIsChatOpen(false)}
+              predictions={predictions}
+              stats={stats}
+              employees={employees}
+            />
+          </>
         )}
       </div>
 
